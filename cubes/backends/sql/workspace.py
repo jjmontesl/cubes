@@ -499,3 +499,13 @@ class SQLStarWorkspace(object):
             insert = InsertIntoAsSelect(table, statement,
                                   columns=statement.columns)
             connection.execute(str(insert))
+
+    def aggregate_for_dimensions(self, dimensions):
+        pass
+
+# Aggregate description:
+#   table name
+#   required dimensions
+#   dimensions
+
+# Aggregate store

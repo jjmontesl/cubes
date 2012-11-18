@@ -151,8 +151,8 @@ class SnowflakeBrowser(AggregationBrowser):
         cond = self.context.condition_for_cell(cell)
 
         statement = self.context.denormalized_statement(whereclause=cond.condition)
-        statement = paginated_statement(statement, page, page_size)
-        statement = ordered_statement(statement, order, context=self.context)
+        statement = self.paginated_statement(statement, page, page_size)
+        statement = self.context.ordered_statement(statement, order)
 
         if self.debug:
             self.logger.info("facts SQL:\n%s" % statement)
@@ -193,8 +193,8 @@ class SnowflakeBrowser(AggregationBrowser):
         statement = self.context.denormalized_statement(whereclause=cond.condition,
                                                         attributes=attributes,
                                                         include_fact_key=False)
-        statement = paginated_statement(statement, page, page_size)
-        statement = ordered_statement(statement, order, context=self.context)
+        statement = self.context.paginated_statement(statement, page, page_size)
+        statement = self.context.ordered_statement(statement, order)
 
         group_by = [self.context.column(attr) for attr in attributes]
         statement = statement.group_by(*group_by)
@@ -269,8 +269,8 @@ class SnowflakeBrowser(AggregationBrowser):
             if self.debug:
                 self.logger.info("aggregation drilldown SQL:\n%s" % statement)
 
-            statement = paginated_statement(statement, page, page_size)
-            statement = ordered_statement(statement, order, context=self.context)
+            statement = self.context.paginated_statement(statement, page, page_size)
+            statement = self.context.ordered_statement(statement, order)
 
             dd_result = self.connectable.execute(statement)
             labels = [c.name for c in statement.columns]
@@ -612,8 +612,8 @@ class QueryContext(object):
             dim = self.cube.dimension(cut.dimension)
 
             if isinstance(cut, PointCut):
-                path = cut.path
-                wrapped_cond = self.condition_for_point(dim, path)
+                wrapped_cond = self.condition_for_point(dim, cut.path,
+                                                        cut.hierarchy)
 
                 condition = wrapped_cond.condition
                 attributes |= wrapped_cond.attributes
@@ -622,7 +622,8 @@ class QueryContext(object):
                 set_conds = []
 
                 for path in cut.paths:
-                    wrapped_cond = self.condition_for_point(dim, path)
+                    wrapped_cond = self.condition_for_point(dim, path,
+                                                            cut.hierarchy)
                     set_conds.append(wrapped_cond.condition)
                     attributes |= wrapped_cond.attributes
 
@@ -630,7 +631,10 @@ class QueryContext(object):
 
             elif isinstance(cut, RangeCut):
                 # FIXME: use hierarchy
-                range_cond = self.range_condition(cut.dimension, None, cut.from_path, cut.to_path)
+                range_cond = self.range_condition(cut.dimension,
+                                                  cut.hierarchy,
+                                                  cut.from_path,
+                                                  cut.to_path)
                 condition = range_cond.condition
                 attributes |= range_cond.attributes
 
@@ -801,6 +805,77 @@ class QueryContext(object):
 
         return columns
 
+    def paginated_statement(self, statement, page, page_size):
+        """Returns paginated statement if page is provided, otherwise returns
+        the same statement."""
+
+        if page is not None and page_size is not None:
+            return statement.offset(page * page_size).limit(page_size)
+        else:
+            return statement
+
+    def ordered_statement(self, statement, order):
+        """Returns a SQL statement which is ordered according to the `order`. If
+        the statement contains attributes that have natural order specified, then
+        the natural order is used, if not overriden in the `order`."""
+
+        # Each attribute mentioned in the order should be present in the selection
+        # or as some column from joined table. Here we get the list of already
+        # selected columns and derived aggregates
+
+        selection = collections.OrderedDict()
+        for c in statement.columns:
+            selection[str(c)] = c
+
+        # Make sure that the `order` is a list of of tuples (`attribute`,
+        # `order`). If element of the `order` list is a string, then it is
+        # converted to (`string`, ``None``).
+
+        order = order or []
+        order_by = collections.OrderedDict()
+
+        for item in order:
+            if isinstance(item, basestring):
+                try:
+                    attribute = self.mapper.attribute(item)
+                    column = self.column(attribute)
+                except KeyError:
+                    column = selection[item]
+
+                order_by[item] = column
+            else:
+                # item is a two-element tuple where first element is attribute
+                # name and second element is ordering
+                try:
+                    attribute = self.mapper.attribute(item[0])
+                    column = self.column(attribute)
+                except KeyError:
+                    column = selection[item[0]]
+                order_by[item] = order_column(column, item[1])
+
+        # Collect natural order for selected columns
+
+        # TODO: should we add natural order for columns that are not selected
+        #       but somewhat involved in the process (GROUP BY)?
+
+        for (name, column) in selection.items():
+            try:
+                # Backward mapping: get Attribute instance by name. The column
+                # name used here is already labelled to the logical name
+                attribute = self.mapper.attribute(name)
+            except KeyError:
+                # Since we are already selecting the column, then it should exist
+                # this exception is raised when we are trying to get Attribute
+                # object for an aggregate - we can safely ignore this.
+
+                # TODO: add natural ordering for measures (may be nice)
+                attribute = None
+
+            if attribute and attribute.order and name not in order_by.keys():
+                order_by[name] = order_column(column, attribute.order)
+
+        return statement.order_by(*order_by.values())
+
 class AggregatedCubeBrowser(AggregationBrowser):
     """docstring for SnowflakeBrowser"""
 
@@ -855,77 +930,6 @@ class AggregatedCubeBrowser(AggregationBrowser):
 
         self.context = QueryContext(self.cube, self.mapper,
                                       metadata=self.metadata)
-
-def paginated_statement(statement, page, page_size):
-    """Returns paginated statement if page is provided, otherwise returns
-    the same statement."""
-
-    if page is not None and page_size is not None:
-        return statement.offset(page * page_size).limit(page_size)
-    else:
-        return statement
-
-def ordered_statement(statement, order, context):
-    """Returns a SQL statement which is ordered according to the `order`. If
-    the statement contains attributes that have natural order specified, then
-    the natural order is used, if not overriden in the `order`."""
-
-    # Each attribute mentioned in the order should be present in the selection
-    # or as some column from joined table. Here we get the list of already
-    # selected columns and derived aggregates
-
-    selection = collections.OrderedDict()
-    for c in statement.columns:
-        selection[str(c)] = c
-
-    # Make sure that the `order` is a list of of tuples (`attribute`,
-    # `order`). If element of the `order` list is a string, then it is
-    # converted to (`string`, ``None``).
-
-    order = order or []
-    order_by = collections.OrderedDict()
-
-    for item in order:
-        if isinstance(item, basestring):
-            try:
-                attribute = context.mapper.attribute(item)
-                column = context.column(attribute)
-            except KeyError:
-                column = selection[item]
-
-            order_by[item] = column
-        else:
-            # item is a two-element tuple where first element is attribute
-            # name and second element is ordering
-            try:
-                attribute = context.mapper.attribute(item[0])
-                column = context.column(attribute)
-            except KeyError:
-                column = selection[item[0]]
-            order_by[item] = order_column(column, item[1])
-
-    # Collect natural order for selected columns
-
-    # TODO: should we add natural order for columns that are not selected
-    #       but somewhat involved in the process (GROUP BY)?
-
-    for (name, column) in selection.items():
-        try:
-            # Backward mapping: get Attribute instance by name. The column
-            # name used here is already labelled to the logical name
-            attribute = context.mapper.attribute(name)
-        except KeyError:
-            # Since we are already selecting the column, then it should exist
-            # this exception is raised when we are trying to get Attribute
-            # object for an aggregate - we can safely ignore this.
-
-            # TODO: add natural ordering for measures (may be nice)
-            attribute = None
-
-        if attribute and attribute.order and name not in order_by.keys():
-            order_by[name] = order_column(column, attribute.order)
-
-    return statement.order_by(*order_by.values())
 
 
 def order_column(column, order):

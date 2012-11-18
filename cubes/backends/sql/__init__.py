@@ -1,7 +1,6 @@
-from denormalizer import *
-from star import *
-from workspace import *
-
+from .denormalizer import *
+from .star import *
+from .workspace import *
 __all__ = []
 
 __all__ += denormalizer.__all__
