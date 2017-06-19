@@ -568,11 +568,14 @@ class StarSchema(object):
 
         key = (mapping.schema or self.schema, mapping.table or self.fact_name)
 
+        if "." in mapping.column:
+            key = (key[0], mapping.column.split(".")[0])
+
         ref = self.table(key)
         table = ref.table
 
         try:
-            column = table.columns[mapping.column]
+            column = table.columns[mapping.column.split(".")[1] if "." in mapping.column else mapping.column]
         except KeyError:
             avail = ", ".join(str(c) for c in table.columns)
             raise SchemaError("Unknown column '%s' in table '%s' possible: %s"
@@ -714,7 +717,7 @@ class StarSchema(object):
         # 2. construct the condition
         # 3. use the appropriate SQL JOIN
         # 4. wrap the star with detail
-        # 
+        #
         # TODO: support MySQL partition (see Issue list)
 
         # First table does not need to be joined. It is the "fact" (or other
